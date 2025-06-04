@@ -111,9 +111,36 @@ class SunoMusicGenerator:
     
     def get_generation_status(self, task_id: str) -> Dict:
         """Get status of music generation task"""
-        # Note: This endpoint isn't specified in the docs, but typically exists
-        # You may need to adjust this based on actual API documentation
-        endpoint = f"{self.base_url}/task/{task_id}"
+        # Based on common API patterns, try different possible endpoints
+        possible_endpoints = [
+            f"{self.base_url}/task/{task_id}",
+            f"{self.base_url}/generate/{task_id}",
+            f"{self.base_url}/status/{task_id}",
+            f"{self.base_url}/task/status/{task_id}"
+        ]
+        
+        for endpoint in possible_endpoints:
+            try:
+                response = requests.get(endpoint, headers=self.headers)
+                if response.status_code == 200:
+                    return {
+                        "success": True,
+                        "status_code": response.status_code,
+                        "data": response.json(),
+                        "endpoint_used": endpoint
+                    }
+            except Exception as e:
+                continue
+        
+        return {
+            "success": False,
+            "error": "No valid status endpoint found. Please check Suno API documentation for the correct status endpoint."
+        }
+    
+    def get_music_details(self, task_id: str) -> Dict:
+        """Get detailed music generation results - alternative method"""
+        # Try the endpoint mentioned in the docs: "Get Music Generation Details"
+        endpoint = f"{self.base_url}/details/{task_id}"
         
         try:
             response = requests.get(endpoint, headers=self.headers)
@@ -176,7 +203,65 @@ def validate_inputs(prompt: str, style: str, title: str, custom_mode: bool,
     
     return len(errors) == 0, errors
 
-def display_song_card(song_data: Dict, index: int):
+def check_and_update_status():
+    """Check status of all pending generations and update accordingly"""
+    if not st.session_state.api_key:
+        return
+    
+    generator = SunoMusicGenerator(st.session_state.api_key)
+    updated = False
+    
+    for song_key, status_info in st.session_state.generation_status.items():
+        if status_info.get('status') == 'processing':
+            task_id = status_info.get('task_id')
+            if task_id:
+                # Try to get status
+                result = generator.get_generation_status(task_id)
+                
+                if result['success']:
+                    data = result.get('data', {})
+                    
+                    # Check if generation is complete
+                    if data.get('code') == 200 and data.get('data'):
+                        song_data = data['data']
+                        
+                        # Check if we have audio URLs (indicates completion)
+                        if isinstance(song_data, list) and len(song_data) > 0:
+                            first_song = song_data[0]
+                            if first_song.get('audio_url'):
+                                # Mark as complete and add to generated songs
+                                st.session_state.generation_status[song_key]['status'] = 'complete'
+                                st.session_state.generated_songs.extend(song_data)
+                                updated = True
+                        
+                        elif isinstance(song_data, dict) and song_data.get('audio_url'):
+                            # Single song completed
+                            st.session_state.generation_status[song_key]['status'] = 'complete'
+                            st.session_state.generated_songs.append(song_data)
+                            updated = True
+                    
+                    # Check for error status
+                    elif data.get('code') != 200:
+                        st.session_state.generation_status[song_key]['status'] = 'error'
+                        st.session_state.generation_status[song_key]['error_message'] = data.get('msg', 'Unknown error')
+                        updated = True
+                
+                # Try alternative method if first one fails
+                elif not result['success']:
+                    details_result = generator.get_music_details(task_id)
+                    if details_result['success']:
+                        # Process details_result similar to above
+                        data = details_result.get('data', {})
+                        if data.get('code') == 200 and data.get('data'):
+                            song_data = data['data']
+                            if isinstance(song_data, list) and len(song_data) > 0:
+                                first_song = song_data[0]
+                                if first_song.get('audio_url'):
+                                    st.session_state.generation_status[song_key]['status'] = 'complete'
+                                    st.session_state.generated_songs.extend(song_data)
+                                    updated = True
+    
+    return updated
     """Display a song card with audio player and download button"""
     with st.container():
         st.markdown(f'<div class="song-card">', unsafe_allow_html=True)
@@ -369,15 +454,27 @@ def main():
                             songs_generated.append(result['data'])
                             status_placeholder.success(f"✅ Song {i + 1} generation started successfully!")
                             
+                            # Extract task_id from response
+                            response_data = result['data']
+                            task_id = None
+                            
+                            # Try different possible locations for task_id
+                            if isinstance(response_data, dict):
+                                task_id = (response_data.get('task_id') or 
+                                         response_data.get('data', {}).get('task_id') or
+                                         response_data.get('id'))
+                            
                             # Store in session state
-                            st.session_state.generation_status[f"song_{len(st.session_state.generated_songs) + i}"] = {
+                            generation_key = f"song_{len(st.session_state.generated_songs) + len(songs_generated)}"
+                            st.session_state.generation_status[generation_key] = {
                                 "status": "processing",
-                                "task_id": result['data'].get('data', {}).get('task_id'),
+                                "task_id": task_id,
                                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "prompt": prompt,
                                 "style": style,
-                                "title": title,
-                                "model": model
+                                "title": f"{title} - Version {i + 1}" if title else f"Generated Song {i + 1}",
+                                "model": model,
+                                "full_response": response_data  # Store full response for debugging
                             }
                         else:
                             st.error(f"❌ Failed to generate song {i + 1}: {result.get('error', 'Unknown error')}")
@@ -394,15 +491,39 @@ def main():
         if not st.session_state.generation_status:
             st.info("No active generations. Generate some music first!")
         else:
-            # Refresh button
-            if st.button("🔄 Refresh Status", type="secondary"):
-                st.rerun()
+            # Auto-refresh and manual refresh options
+            col1, col2, col3 = st.columns([1, 1, 2])
+            
+            with col1:
+                if st.button("🔄 Refresh Status", type="secondary"):
+                    with st.spinner("Checking status..."):
+                        updated = check_and_update_status()
+                        if updated:
+                            st.success("✅ Status updated!")
+                            st.rerun()
+                        else:
+                            st.info("No status changes detected")
+            
+            with col2:
+                auto_refresh = st.checkbox("Auto-refresh (30s)", value=False)
+            
+            with col3:
+                if auto_refresh:
+                    # Auto-refresh every 30 seconds
+                    time.sleep(30)
+                    updated = check_and_update_status()
+                    if updated:
+                        st.rerun()
             
             st.markdown("---")
             
+            # Debug information
+            with st.expander("🔧 Debug Information"):
+                st.json(st.session_state.generation_status)
+            
             for song_key, status_info in st.session_state.generation_status.items():
                 with st.container():
-                    col1, col2, col3 = st.columns([2, 1, 1])
+                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
                     
                     with col1:
                         st.write(f"**{status_info.get('title', 'Unknown Title')}**")
@@ -419,6 +540,8 @@ def main():
                             st.markdown('<span class="status-badge status-complete">✅ Complete</span>', unsafe_allow_html=True)
                         elif status == 'error':
                             st.markdown('<span class="status-badge status-error">❌ Error</span>', unsafe_allow_html=True)
+                            if status_info.get('error_message'):
+                                st.error(f"Error: {status_info['error_message']}")
                         else:
                             st.markdown('<span class="status-badge status-pending">⏳ Pending</span>', unsafe_allow_html=True)
                     
@@ -426,6 +549,22 @@ def main():
                         task_id = status_info.get('task_id')
                         if task_id:
                             st.code(f"Task: {task_id[:8]}...", language=None)
+                        else:
+                            st.warning("No Task ID")
+                    
+                    with col4:
+                        # Manual check button for individual songs
+                        if st.button(f"Check {song_key}", key=f"check_{song_key}"):
+                            if task_id and st.session_state.api_key:
+                                generator = SunoMusicGenerator(st.session_state.api_key)
+                                result = generator.get_generation_status(task_id)
+                                
+                                if result['success']:
+                                    st.success("✅ Status checked")
+                                    with st.expander(f"Response for {song_key}"):
+                                        st.json(result['data'])
+                                else:
+                                    st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
                 
                 st.markdown("---")
     
