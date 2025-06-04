@@ -111,17 +111,78 @@ class SunoMusicGenerator:
     
     def get_generation_status(self, task_id: str) -> Dict:
         """Get status of music generation task"""
-        # Based on common API patterns, try different possible endpoints
+        # Based on the API documentation and common patterns, try these endpoints
         possible_endpoints = [
+            f"{self.base_url}/details/{task_id}",  # Most likely based on docs
             f"{self.base_url}/task/{task_id}",
             f"{self.base_url}/generate/{task_id}",
             f"{self.base_url}/status/{task_id}",
-            f"{self.base_url}/task/status/{task_id}"
+            f"{self.base_url}/music/{task_id}",
+            f"{self.base_url}/v1/details/{task_id}",
+            f"{self.base_url}/api/v1/details/{task_id}",
+            f"{self.base_url}/api/v1/task/{task_id}",
+            f"{self.base_url}/api/v1/status/{task_id}"
         ]
+        
+        results = []
         
         for endpoint in possible_endpoints:
             try:
                 response = requests.get(endpoint, headers=self.headers)
+                result_data = {
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "success": response.status_code == 200,
+                    "response_text": response.text[:500] if response.text else "",
+                }
+                
+                if response.status_code == 200:
+                    try:
+                        json_data = response.json()
+                        result_data["data"] = json_data
+                        results.append(result_data)
+                        
+                        # Return the first successful response
+                        return {
+                            "success": True,
+                            "status_code": response.status_code,
+                            "data": json_data,
+                            "endpoint_used": endpoint,
+                            "all_attempts": results
+                        }
+                    except:
+                        result_data["error"] = "Invalid JSON response"
+                
+                results.append(result_data)
+                
+            except Exception as e:
+                results.append({
+                    "endpoint": endpoint,
+                    "error": str(e),
+                    "success": False
+                })
+        
+        return {
+            "success": False,
+            "error": "No valid status endpoint found",
+            "all_attempts": results
+        }
+    
+    def get_music_details(self, task_id: str) -> Dict:
+        """Get detailed music generation results using POST method"""
+        # Some APIs require POST instead of GET
+        possible_endpoints = [
+            f"{self.base_url}/details",
+            f"{self.base_url}/api/v1/details",
+            f"{self.base_url}/fetch"
+        ]
+        
+        for endpoint in possible_endpoints:
+            try:
+                # Try with task_id in body
+                payload = {"task_id": task_id}
+                response = requests.post(endpoint, json=payload, headers=self.headers)
+                
                 if response.status_code == 200:
                     return {
                         "success": True,
@@ -134,26 +195,8 @@ class SunoMusicGenerator:
         
         return {
             "success": False,
-            "error": "No valid status endpoint found. Please check Suno API documentation for the correct status endpoint."
+            "error": "No valid details endpoint found"
         }
-    
-    def get_music_details(self, task_id: str) -> Dict:
-        """Get detailed music generation results - alternative method"""
-        # Try the endpoint mentioned in the docs: "Get Music Generation Details"
-        endpoint = f"{self.base_url}/details/{task_id}"
-        
-        try:
-            response = requests.get(endpoint, headers=self.headers)
-            return {
-                "success": True,
-                "status_code": response.status_code,
-                "data": response.json()
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
 
 def initialize_session_state():
     """Initialize session state variables"""
@@ -454,17 +497,35 @@ def main():
                             songs_generated.append(result['data'])
                             status_placeholder.success(f"✅ Song {i + 1} generation started successfully!")
                             
-                            # Extract task_id from response
+                            # Extract task_id from response more thoroughly
                             response_data = result['data']
                             task_id = None
                             
                             # Try different possible locations for task_id
                             if isinstance(response_data, dict):
-                                task_id = (response_data.get('task_id') or 
-                                         response_data.get('data', {}).get('task_id') or
-                                         response_data.get('id'))
+                                # Common locations for task_id
+                                task_id = (
+                                    response_data.get('task_id') or 
+                                    response_data.get('taskId') or
+                                    response_data.get('id') or
+                                    response_data.get('data', {}).get('task_id') or
+                                    response_data.get('data', {}).get('taskId') or
+                                    response_data.get('data', {}).get('id')
+                                )
+                                
+                                # If still no task_id, look deeper
+                                if not task_id and 'data' in response_data:
+                                    data_section = response_data['data']
+                                    if isinstance(data_section, list) and len(data_section) > 0:
+                                        first_item = data_section[0]
+                                        if isinstance(first_item, dict):
+                                            task_id = (
+                                                first_item.get('task_id') or
+                                                first_item.get('taskId') or
+                                                first_item.get('id')
+                                            )
                             
-                            # Store in session state
+                            # Store in session state with better task_id extraction
                             generation_key = f"song_{len(st.session_state.generated_songs) + len(songs_generated)}"
                             st.session_state.generation_status[generation_key] = {
                                 "status": "processing",
@@ -474,8 +535,25 @@ def main():
                                 "style": style,
                                 "title": f"{title} - Version {i + 1}" if title else f"Generated Song {i + 1}",
                                 "model": model,
-                                "full_response": response_data  # Store full response for debugging
+                                "full_response": response_data,  # Store full response for debugging
+                                "generation_request": {  # Store original request for reference
+                                    "custom_mode": custom_mode,
+                                    "instrumental": instrumental,
+                                    "negative_tags": negative_tags
+                                }
                             }
+                            
+                            # Show task_id extraction info
+                            if task_id:
+                                status_placeholder.info(f"📝 Task ID extracted: {task_id}")
+                            else:
+                                status_placeholder.warning(f"⚠️ No task ID found in response for song {i + 1}. Check debug info in Status tab.")
+                            
+                            # Store the raw response for debugging
+                            debug_key = f"debug_response_{generation_key}"
+                            if 'debug_responses' not in st.session_state:
+                                st.session_state.debug_responses = {}
+                            st.session_state.debug_responses[debug_key] = response_data
                         else:
                             st.error(f"❌ Failed to generate song {i + 1}: {result.get('error', 'Unknown error')}")
                     
@@ -517,9 +595,80 @@ def main():
             
             st.markdown("---")
             
-            # Debug information
-            with st.expander("🔧 Debug Information"):
+            # Debug information and manual task check
+            with st.expander("🔧 Debug Information & Manual Check"):
+                st.markdown("**Current Session Data:**")
                 st.json(st.session_state.generation_status)
+                
+                st.markdown("---")
+                st.markdown("**Manual Task ID Check:**")
+                st.info("If you have a task ID from Suno's logs, enter it here to check its status manually.")
+                
+                col_debug1, col_debug2 = st.columns([2, 1])
+                with col_debug1:
+                    manual_task_id = st.text_input("Enter Task ID:", placeholder="e.g., 2fac****9f72")
+                with col_debug2:
+                    if st.button("Check Manual ID", disabled=not manual_task_id.strip()):
+                        if manual_task_id.strip() and st.session_state.api_key:
+                            generator = SunoMusicGenerator(st.session_state.api_key)
+                            
+                            with st.spinner("Checking manual task ID..."):
+                                result = generator.get_generation_status(manual_task_id.strip())
+                                
+                                if result['success']:
+                                    st.success("✅ Found task data!")
+                                    
+                                    # Display the response
+                                    st.json(result['data'])
+                                    
+                                    # Check if this contains completed songs
+                                    data = result.get('data', {})
+                                    if data.get('code') == 200 and data.get('data'):
+                                        song_data = data['data']
+                                        
+                                        if isinstance(song_data, list):
+                                            completed_songs = [song for song in song_data if song.get('audio_url')]
+                                            if completed_songs:
+                                                st.success(f"🎵 Found {len(completed_songs)} completed songs!")
+                                                
+                                                # Option to add to session
+                                                if st.button("Add to Generated Songs", key="add_manual_songs"):
+                                                    st.session_state.generated_songs.extend(completed_songs)
+                                                    st.success("Songs added to Generated Songs tab!")
+                                                    st.rerun()
+                                        
+                                        elif isinstance(song_data, dict) and song_data.get('audio_url'):
+                                            st.success("🎵 Found 1 completed song!")
+                                            if st.button("Add to Generated Songs", key="add_manual_song"):
+                                                st.session_state.generated_songs.append(song_data)
+                                                st.success("Song added to Generated Songs tab!")
+                                                st.rerun()
+                                
+                                else:
+                                    st.error("❌ Failed to get task data")
+                                    st.json(result.get('all_attempts', []))
+                
+                st.markdown("---")
+                st.markdown("**API Endpoint Testing Results:**")
+                if st.button("Test All Endpoints", key="test_endpoints"):
+                    if st.session_state.generation_status:
+                        first_task = list(st.session_state.generation_status.values())[0]
+                        test_task_id = first_task.get('task_id')
+                        
+                        if test_task_id:
+                            generator = SunoMusicGenerator(st.session_state.api_key)
+                            result = generator.get_generation_status(test_task_id)
+                            
+                            st.markdown("**Endpoint Test Results:**")
+                            for attempt in result.get('all_attempts', []):
+                                status_color = "🟢" if attempt.get('success') else "🔴"
+                                st.markdown(f"{status_color} `{attempt.get('endpoint', 'Unknown')}` - Status: {attempt.get('status_code', 'Error')}")
+                                
+                                if attempt.get('response_text'):
+                                    with st.expander(f"Response from {attempt.get('endpoint', 'Unknown')}"):
+                                        st.text(attempt['response_text'])
+                        else:
+                            st.warning("No task ID found to test with")
             
             for song_key, status_info in st.session_state.generation_status.items():
                 with st.container():
