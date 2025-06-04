@@ -111,24 +111,29 @@ class SunoMusicGenerator:
     
     def get_generation_status(self, task_id: str) -> Dict:
         """Get status of music generation task"""
-        # Based on the API documentation and common patterns, try these endpoints
+        # Based on the research, these are the most likely correct endpoints
         possible_endpoints = [
-            f"{self.base_url}/details/{task_id}",  # Most likely based on docs
+            # From PiAPI docs - most likely correct pattern
+            f"{self.base_url}/music/{task_id}",
+            f"{self.base_url}/api/v1/music/{task_id}",
+            # From documentation mentions
+            f"{self.base_url}/details/{task_id}",  
+            f"{self.base_url}/api/v1/details/{task_id}",
+            # Other common patterns
             f"{self.base_url}/task/{task_id}",
+            f"{self.base_url}/api/v1/task/{task_id}",
             f"{self.base_url}/generate/{task_id}",
             f"{self.base_url}/status/{task_id}",
-            f"{self.base_url}/music/{task_id}",
             f"{self.base_url}/v1/details/{task_id}",
-            f"{self.base_url}/api/v1/details/{task_id}",
-            f"{self.base_url}/api/v1/task/{task_id}",
-            f"{self.base_url}/api/v1/status/{task_id}"
+            f"{self.base_url}/v1/music/{task_id}",
+            f"{self.base_url}/v1/task/{task_id}"
         ]
         
         results = []
         
         for endpoint in possible_endpoints:
             try:
-                response = requests.get(endpoint, headers=self.headers)
+                response = requests.get(endpoint, headers=self.headers, timeout=10)
                 result_data = {
                     "endpoint": endpoint,
                     "status_code": response.status_code,
@@ -155,6 +160,12 @@ class SunoMusicGenerator:
                 
                 results.append(result_data)
                 
+            except requests.exceptions.Timeout:
+                results.append({
+                    "endpoint": endpoint,
+                    "error": "Request timeout",
+                    "success": False
+                })
             except Exception as e:
                 results.append({
                     "endpoint": endpoint,
@@ -170,18 +181,21 @@ class SunoMusicGenerator:
     
     def get_music_details(self, task_id: str) -> Dict:
         """Get detailed music generation results using POST method"""
-        # Some APIs require POST instead of GET
+        # Some APIs require POST instead of GET with task_id in body
         possible_endpoints = [
             f"{self.base_url}/details",
-            f"{self.base_url}/api/v1/details",
-            f"{self.base_url}/fetch"
+            f"{self.base_url}/api/v1/details", 
+            f"{self.base_url}/fetch",
+            f"{self.base_url}/api/v1/fetch",
+            f"{self.base_url}/music",
+            f"{self.base_url}/api/v1/music"
         ]
         
         for endpoint in possible_endpoints:
             try:
                 # Try with task_id in body
                 payload = {"task_id": task_id}
-                response = requests.post(endpoint, json=payload, headers=self.headers)
+                response = requests.post(endpoint, json=payload, headers=self.headers, timeout=10)
                 
                 if response.status_code == 200:
                     return {
@@ -190,6 +204,19 @@ class SunoMusicGenerator:
                         "data": response.json(),
                         "endpoint_used": endpoint
                     }
+                    
+                # Also try with different payload formats
+                payload = {"taskId": task_id}
+                response = requests.post(endpoint, json=payload, headers=self.headers, timeout=10)
+                
+                if response.status_code == 200:
+                    return {
+                        "success": True,
+                        "status_code": response.status_code,
+                        "data": response.json(),
+                        "endpoint_used": endpoint
+                    }
+                    
             except Exception as e:
                 continue
         
@@ -247,64 +274,30 @@ def validate_inputs(prompt: str, style: str, title: str, custom_mode: bool,
     return len(errors) == 0, errors
 
 def check_and_update_status():
-    """Check status of all pending generations and update accordingly"""
-    if not st.session_state.api_key:
-        return
-    
-    generator = SunoMusicGenerator(st.session_state.api_key)
-    updated = False
-    
-    for song_key, status_info in st.session_state.generation_status.items():
-        if status_info.get('status') == 'processing':
-            task_id = status_info.get('task_id')
-            if task_id:
-                # Try to get status
-                result = generator.get_generation_status(task_id)
+    """
+    Since this API is callback-based, we can't poll for status.
+    This function is kept for manual song addition functionality.
+    """
+    return False
+
+def add_completed_songs_manually(callback_data: Dict):
+    """Add completed songs from callback data manually"""
+    try:
+        if callback_data.get('code') == 200 and callback_data.get('data'):
+            data_section = callback_data['data']
+            if 'data' in data_section and isinstance(data_section['data'], list):
+                songs = data_section['data']
                 
-                if result['success']:
-                    data = result.get('data', {})
-                    
-                    # Check if generation is complete
-                    if data.get('code') == 200 and data.get('data'):
-                        song_data = data['data']
-                        
-                        # Check if we have audio URLs (indicates completion)
-                        if isinstance(song_data, list) and len(song_data) > 0:
-                            first_song = song_data[0]
-                            if first_song.get('audio_url'):
-                                # Mark as complete and add to generated songs
-                                st.session_state.generation_status[song_key]['status'] = 'complete'
-                                st.session_state.generated_songs.extend(song_data)
-                                updated = True
-                        
-                        elif isinstance(song_data, dict) and song_data.get('audio_url'):
-                            # Single song completed
-                            st.session_state.generation_status[song_key]['status'] = 'complete'
-                            st.session_state.generated_songs.append(song_data)
-                            updated = True
-                    
-                    # Check for error status
-                    elif data.get('code') != 200:
-                        st.session_state.generation_status[song_key]['status'] = 'error'
-                        st.session_state.generation_status[song_key]['error_message'] = data.get('msg', 'Unknown error')
-                        updated = True
+                # Add songs to session state
+                for song in songs:
+                    if song.get('audio_url'):
+                        st.session_state.generated_songs.append(song)
                 
-                # Try alternative method if first one fails
-                elif not result['success']:
-                    details_result = generator.get_music_details(task_id)
-                    if details_result['success']:
-                        # Process details_result similar to above
-                        data = details_result.get('data', {})
-                        if data.get('code') == 200 and data.get('data'):
-                            song_data = data['data']
-                            if isinstance(song_data, list) and len(song_data) > 0:
-                                first_song = song_data[0]
-                                if first_song.get('audio_url'):
-                                    st.session_state.generation_status[song_key]['status'] = 'complete'
-                                    st.session_state.generated_songs.extend(song_data)
-                                    updated = True
+                return len(songs)
+    except Exception as e:
+        st.error(f"Error processing callback data: {str(e)}")
     
-    return updated
+    return 0
     """Display a song card with audio player and download button"""
     with st.container():
         st.markdown(f'<div class="song-card">', unsafe_allow_html=True)
@@ -564,115 +557,115 @@ def main():
                         st.info("📝 Check the 'Generation Status' tab to monitor progress and the 'Generated Songs' tab to play completed songs.")
     
     with tab2:
-        st.header("📊 Generation Status")
+        st.header("📊 Generation Status & Callback Handler")
+        
+        # Explain the callback system
+        st.info("""
+        ℹ️ **How Suno API Works:**
+        
+        Suno API uses a **callback system** - when your songs are ready, Suno sends the results to your `callBackUrl`. 
+        Since Streamlit Cloud can't receive webhooks directly, you have two options:
+        
+        1. **Check Suno's logs/dashboard** for completed songs
+        2. **Manually add completed songs** using the callback data below
+        """)
         
         if not st.session_state.generation_status:
             st.info("No active generations. Generate some music first!")
         else:
-            # Auto-refresh and manual refresh options
-            col1, col2, col3 = st.columns([1, 1, 2])
+            # Manual refresh - now just for display purposes
+            col1, col2 = st.columns([1, 3])
             
             with col1:
-                if st.button("🔄 Refresh Status", type="secondary"):
-                    with st.spinner("Checking status..."):
-                        updated = check_and_update_status()
-                        if updated:
-                            st.success("✅ Status updated!")
-                            st.rerun()
-                        else:
-                            st.info("No status changes detected")
+                if st.button("🔄 Refresh Display", type="secondary"):
+                    st.rerun()
             
             with col2:
-                auto_refresh = st.checkbox("Auto-refresh (30s)", value=False)
-            
-            with col3:
-                if auto_refresh:
-                    # Auto-refresh every 30 seconds
-                    time.sleep(30)
-                    updated = check_and_update_status()
-                    if updated:
-                        st.rerun()
+                st.write("💡 **Tip:** Songs will appear in the 'Generated Songs' tab when you add them manually below.")
             
             st.markdown("---")
             
-            # Debug information and manual task check
-            with st.expander("🔧 Debug Information & Manual Check"):
-                st.markdown("**Current Session Data:**")
-                st.json(st.session_state.generation_status)
-                
-                st.markdown("---")
-                st.markdown("**Manual Task ID Check:**")
-                st.info("If you have a task ID from Suno's logs, enter it here to check its status manually.")
-                
-                col_debug1, col_debug2 = st.columns([2, 1])
-                with col_debug1:
-                    manual_task_id = st.text_input("Enter Task ID:", placeholder="e.g., 2fac****9f72")
-                with col_debug2:
-                    if st.button("Check Manual ID", disabled=not manual_task_id.strip()):
-                        if manual_task_id.strip() and st.session_state.api_key:
-                            generator = SunoMusicGenerator(st.session_state.api_key)
-                            
-                            with st.spinner("Checking manual task ID..."):
-                                result = generator.get_generation_status(manual_task_id.strip())
-                                
-                                if result['success']:
-                                    st.success("✅ Found task data!")
-                                    
-                                    # Display the response
-                                    st.json(result['data'])
-                                    
-                                    # Check if this contains completed songs
-                                    data = result.get('data', {})
-                                    if data.get('code') == 200 and data.get('data'):
-                                        song_data = data['data']
-                                        
-                                        if isinstance(song_data, list):
-                                            completed_songs = [song for song in song_data if song.get('audio_url')]
-                                            if completed_songs:
-                                                st.success(f"🎵 Found {len(completed_songs)} completed songs!")
-                                                
-                                                # Option to add to session
-                                                if st.button("Add to Generated Songs", key="add_manual_songs"):
-                                                    st.session_state.generated_songs.extend(completed_songs)
-                                                    st.success("Songs added to Generated Songs tab!")
-                                                    st.rerun()
-                                        
-                                        elif isinstance(song_data, dict) and song_data.get('audio_url'):
-                                            st.success("🎵 Found 1 completed song!")
-                                            if st.button("Add to Generated Songs", key="add_manual_song"):
-                                                st.session_state.generated_songs.append(song_data)
-                                                st.success("Song added to Generated Songs tab!")
-                                                st.rerun()
-                                
-                                else:
-                                    st.error("❌ Failed to get task data")
-                                    st.json(result.get('all_attempts', []))
-                
-                st.markdown("---")
-                st.markdown("**API Endpoint Testing Results:**")
-                if st.button("Test All Endpoints", key="test_endpoints"):
-                    if st.session_state.generation_status:
-                        first_task = list(st.session_state.generation_status.values())[0]
-                        test_task_id = first_task.get('task_id')
-                        
-                        if test_task_id:
-                            generator = SunoMusicGenerator(st.session_state.api_key)
-                            result = generator.get_generation_status(test_task_id)
-                            
-                            st.markdown("**Endpoint Test Results:**")
-                            for attempt in result.get('all_attempts', []):
-                                status_color = "🟢" if attempt.get('success') else "🔴"
-                                st.markdown(f"{status_color} `{attempt.get('endpoint', 'Unknown')}` - Status: {attempt.get('status_code', 'Error')}")
-                                
-                                if attempt.get('response_text'):
-                                    with st.expander(f"Response from {attempt.get('endpoint', 'Unknown')}"):
-                                        st.text(attempt['response_text'])
-                        else:
-                            st.warning("No task ID found to test with")
+            # Manual callback data entry
+            st.subheader("🔧 Add Completed Songs Manually")
+            st.write("When your songs are ready, copy the callback data from Suno and paste it here:")
             
+            callback_json = st.text_area(
+                "Paste Callback JSON Data:",
+                height=200,
+                placeholder="""Paste the complete callback JSON here, for example:
+{
+  "code": 200,
+  "msg": "All generated successfully.",
+  "data": {
+    "callbackType": "complete",
+    "task_id": "2fac****9f72",
+    "data": [
+      {
+        "id": "8551****662c",
+        "audio_url": "https://example.cn/****.mp3",
+        "title": "Your Song Title",
+        "tags": "rock, energetic",
+        ...
+      }
+    ]
+  }
+}""",
+                help="Copy the complete JSON response from Suno's callback"
+            )
+            
+            col_parse1, col_parse2 = st.columns([1, 1])
+            
+            with col_parse1:
+                if st.button("🎵 Add Songs from Callback", type="primary", disabled=not callback_json.strip()):
+                    try:
+                        import json
+                        callback_data = json.loads(callback_json)
+                        songs_added = add_completed_songs_manually(callback_data)
+                        
+                        if songs_added > 0:
+                            st.success(f"✅ Successfully added {songs_added} songs!")
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ No valid songs found in the callback data")
+                    
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ Invalid JSON format: {str(e)}")
+                    except Exception as e:
+                        st.error(f"❌ Error processing data: {str(e)}")
+            
+            with col_parse2:
+                if st.button("📋 Show Example Callback", key="show_example"):
+                    st.json({
+                        "code": 200,
+                        "msg": "All generated successfully.",
+                        "data": {
+                            "callbackType": "complete",
+                            "task_id": "2fac****9f72",
+                            "data": [
+                                {
+                                    "id": "8551****662c",
+                                    "audio_url": "https://example.cn/****.mp3",
+                                    "source_audio_url": "https://example.cn/****.mp3",
+                                    "stream_audio_url": "https://example.cn/****",
+                                    "image_url": "https://example.cn/****.jpeg",
+                                    "prompt": "[Verse] Night city lights shining bright",
+                                    "model_name": "chirp-v3-5",
+                                    "title": "Iron Man",
+                                    "tags": "electrifying, rock",
+                                    "createTime": "2025-01-01 00:00:00",
+                                    "duration": 198.44
+                                }
+                            ]
+                        }
+                    })
+            
+            st.markdown("---")
+            
+            # Show current generation requests
+            st.subheader("📝 Generation Requests")
             for song_key, status_info in st.session_state.generation_status.items():
                 with st.container():
-                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                    col1, col2, col3 = st.columns([2, 1, 1])
                     
                     with col1:
                         st.write(f"**{status_info.get('title', 'Unknown Title')}**")
@@ -680,17 +673,14 @@ def main():
                         st.write(f"Started: {status_info.get('timestamp', 'N/A')}")
                     
                     with col2:
-                        status = status_info.get('status', 'unknown')
+                        status = status_info.get('status', 'processing')
                         if status == 'processing':
                             st.markdown('<span class="status-badge status-processing">🔄 Processing</span>', unsafe_allow_html=True)
-                            # Show progress bar for processing
-                            st.progress(50, text="Generating...")
+                            st.info("⏳ Waiting for callback...")
                         elif status == 'complete':
                             st.markdown('<span class="status-badge status-complete">✅ Complete</span>', unsafe_allow_html=True)
                         elif status == 'error':
                             st.markdown('<span class="status-badge status-error">❌ Error</span>', unsafe_allow_html=True)
-                            if status_info.get('error_message'):
-                                st.error(f"Error: {status_info['error_message']}")
                         else:
                             st.markdown('<span class="status-badge status-pending">⏳ Pending</span>', unsafe_allow_html=True)
                     
@@ -700,22 +690,17 @@ def main():
                             st.code(f"Task: {task_id[:8]}...", language=None)
                         else:
                             st.warning("No Task ID")
-                    
-                    with col4:
-                        # Manual check button for individual songs
-                        if st.button(f"Check {song_key}", key=f"check_{song_key}"):
-                            if task_id and st.session_state.api_key:
-                                generator = SunoMusicGenerator(st.session_state.api_key)
-                                result = generator.get_generation_status(task_id)
-                                
-                                if result['success']:
-                                    st.success("✅ Status checked")
-                                    with st.expander(f"Response for {song_key}"):
-                                        st.json(result['data'])
-                                else:
-                                    st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
                 
                 st.markdown("---")
+            
+            # Debug information
+            with st.expander("🔧 Debug Information"):
+                st.markdown("**Session State:**")
+                st.json(st.session_state.generation_status)
+                
+                if 'debug_responses' in st.session_state:
+                    st.markdown("**API Responses:**")
+                    st.json(st.session_state.debug_responses)
     
     with tab3:
         st.header("🎵 Generated Songs")
